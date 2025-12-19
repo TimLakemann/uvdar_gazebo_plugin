@@ -28,6 +28,8 @@
 #include <ObjectMgr/LedMgr.h>
 #include <std_msgs/Float64.h>
 #include <uvdar_gazebo_plugin/LedInfo.h>
+#include <uvdar_gazebo_plugin/LEDwithName.h>
+#include <uvdar_gazebo_plugin/LEDwithNameArray.h>
 #include <uvdar_gazebo_plugin/CamInfo.h>
 #include <uvdar_gazebo_plugin/LedMessage.h>
 #include <sensor_msgs/PointCloud.h>
@@ -42,11 +44,13 @@
 namespace gazebo
 {
 
+
   struct CameraProps {
       std::string scoped_name;
       std::string parent_name;
       unsigned int sensor_id;
       std::string publish_topic;
+      std::string publish_topic_img;
       double f;
       bool occlusions;
   };
@@ -57,6 +61,7 @@ namespace gazebo
       sensors::SensorPtr sensor;
       ignition::math::Pose3d pose;
       ros::Publisher virtual_points_publisher;
+      ros::Publisher led_points_publisher;
   };
 
 class UvCam : public SensorPlugin {
@@ -110,6 +115,7 @@ private:
 
   std::string filename;
   std::string publish_topic;
+  std::string publish_topic_img; 
 
   std::unordered_map<std::string, std::shared_ptr<LedMgr> > _leds_by_name_;
 
@@ -231,11 +237,14 @@ public:
 
     if (_sdf->HasElement("camera_publish_topic")) {
       publish_topic = _sdf->GetElement("camera_publish_topic")->Get<std::string>();
+      publish_topic_img = publish_topic +"/leds_in_img_w_names";
     } else {
       publish_topic = parentName.substr(0, parentName.find(":")) + "/uvdar_bluefox/image_raw";
+      publish_topic_img = publish_topic +"/leds_in_img_w_names";
     }
 
     ledInfoSubscriber = nh_.subscribe("/gazebo/ledProperties", 20, &UvCam::ledInfoCallback,this);
+
 
     // Create a named topic, and subscribe to it.
     ros::SubscribeOptions so =
@@ -248,7 +257,7 @@ public:
     linkSub = nh_.subscribe(so);
     /* linkSub = nh.subscribe("/gazebo/link_states", 1, &UvCam::linkCallback, this); */
 
-    camera_props = {.scoped_name=_parent->ScopedName(), .parent_name=_parent->ParentName(), .sensor_id=_parent->Id(), .publish_topic=publish_topic, .f=f, .occlusions=_use_occlusions};
+    camera_props = {.scoped_name=_parent->ScopedName(), .parent_name=_parent->ParentName(), .sensor_id=_parent->Id(), .publish_topic=publish_topic, .publish_topic_img=publish_topic_img, .f=f, .occlusions=_use_occlusions};
     auto preferredCamera = findExistingEquivalentCamera(camera_props);
     if (preferredCamera) {
       std::cout << "UVCAM " << _parent->Name() << " will yield rendering to " << preferredCamera.value().scoped_name << "." << std::endl;
@@ -259,6 +268,7 @@ public:
       /* nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/name", _parent->Name()); */
       nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/scoped_name", _parent->ScopedName());
       nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/publish_topic", publish_topic);
+      nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/publish_topic_img", publish_topic_img);
       nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/f", f);
       nh_.setParam(CAM_EXISTENCE_HEADER+_parent->Name()+"/occlusions", _use_occlusions);
       /* CameraProps camera_props = {.name=_parent->Name(), .scoped_name=_parent->ScopedName(), .publish_topic=publish_topic, .f=f, .occlusions=_use_occlusions}; */
@@ -267,6 +277,8 @@ public:
       int   zero  = 0;
       ros::init(zero, &dummy, "uvdar_bluefox_emulator");
       addCamera(camera_props, true);
+
+
 
       yield_sub = nh_.subscribe(CAM_YIELD_TOPIC, 10, &UvCam::yieldCallback, this);
 
@@ -311,7 +323,9 @@ private:
     geometry_msgs::Pose cur_led_pose;
     cv::Point3d output;
     geometry_msgs::Point32 pt;
+    uvdar_gazebo_plugin::LEDwithName msg_led_with_name;
     sensor_msgs::PointCloud msg_ptcl;
+    uvdar_gazebo_plugin::LEDwithNameArray msg_leds_with_names_array;
     std::unordered_map<std::string, std::shared_ptr<LedMgr>> leds_by_name_local;
     /* std::pair<std::string, std::shared_ptr<LedMgr> > led; */
     ROS_INFO_STREAM("[" << ros::this_node::getName().c_str() << "]: loop start");
@@ -343,6 +357,7 @@ private:
         }
         msg_ptcl.header.stamp = ros::Time::now();
         msg_ptcl.points.clear();
+        msg_leds_with_names_array.leds.clear();
         double sec_time = msg_ptcl.header.stamp.toSec();
         for (auto& led : leds_by_name_local){
           if (led.second->get_pose(cur_led_pose, sec_time)){
@@ -350,12 +365,18 @@ private:
               pt.x = output.x;
               pt.y = output.y;
               pt.z = output.z;
+              msg_led_with_name.x = static_cast<int>(output.x);
+              msg_led_with_name.y = static_cast<int>(output.y);
+              msg_led_with_name.link_name = led.first;
+              msg_leds_with_names_array.leds.push_back(msg_led_with_name);
               msg_ptcl.points.push_back(pt);
             }
           }
         }
     /* ROS_INFO_STREAM("[" << ros::this_node::getName().c_str() << "]: publishing"); */
         cam.virtual_points_publisher.publish(msg_ptcl);
+        cam.led_points_publisher.publish(msg_leds_with_names_array);
+
         /* end         = std::clock(); */
         /* elapsedTime = double(end - begin) / CLOCKS_PER_SEC; */
         /* std::cout << "UV CAM: Drawing took : " << elapsedTime << " s" << std::endl; */
@@ -595,6 +616,7 @@ void yieldCallback(const uvdar_gazebo_plugin::CamInfoConstPtr &cam_info)
   cam_props.parent_name = cam_info->parent_name.data;
   cam_props.sensor_id = cam_info->sensor_id.data;
   cam_props.publish_topic = cam_info->publish_topic.data;
+  cam_props.publish_topic_img = cam_info->publish_topic_img.data;
   cam_props.f = cam_info->f.data;
   cam_props.occlusions = cam_info->occlusions.data;
 
@@ -615,6 +637,7 @@ bool addCamera(CameraProps cam_props, bool is_local=false)
       sensor = local_sensor;
     }
 
+
     if (sensor != nullptr){
       physics::EntityPtr entity = world->EntityByName(sensor->ParentName());
 
@@ -625,7 +648,8 @@ bool addCamera(CameraProps cam_props, bool is_local=false)
             .parent_entity = entity,
             .sensor = sensor,
             .pose=ignition::math::Pose3d(),
-            .virtual_points_publisher = nh_.advertise<sensor_msgs::PointCloud>("/gazebo"+cam_props.publish_topic, 1)});
+            .virtual_points_publisher = nh_.advertise<sensor_msgs::PointCloud>("/gazebo"+cam_props.publish_topic, 1),
+            .led_points_publisher = nh_.advertise<uvdar_gazebo_plugin::LEDwithNameArray>("/gazebo"+cam_props.publish_topic_img, 1)});
         std::cout << "Adding UV Camera " << cam_props.scoped_name << " data to topic: /gazebo" << cam_props.publish_topic << "\"" << std::endl;
         return true;
       }
@@ -707,6 +731,7 @@ bool yieldRendering(CameraProps cam_props){
   cam_info.parent_name.data = cam_props.parent_name;
   cam_info.sensor_id.data = cam_props.sensor_id;
   cam_info.publish_topic.data = cam_props.publish_topic;
+  cam_info.publish_topic_img.data = cam_props.publish_topic_img;
   cam_info.f.data = cam_props.f;
   cam_info.occlusions.data = cam_props.occlusions;
   yield_publisher.publish(cam_info);

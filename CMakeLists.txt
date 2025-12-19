@@ -34,6 +34,8 @@ find_package(catkin REQUIRED COMPONENTS
 
 add_message_files(DIRECTORY msg FILES
   LedInfo.msg
+  LEDwithName.msg
+  LEDwithNameArray.msg
   CamInfo.msg
   LedMessage.msg
   )
